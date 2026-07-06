@@ -82,10 +82,12 @@ open build/PureViewMedia.app
 
 ## 目录结构
 ```
-PureViewMac/
+macos/
 ├── project.yml                    # xcodegen 工程定义
 ├── PureViewMedia.xcodeproj/       # 生成的 Xcode 工程
-├── build-app.sh                   # 免 Xcode 构建 .app
+├── build-app.sh                   # 免 Xcode 构建 .app（会把图标打包进去）
+├── Resources/
+│   └── AppIcon.icns               # 应用图标（渐变 squircle + 照片卡 + 播放徽标）
 ├── Sources/
 │   ├── main.swift                 # 入口（等价 wWinMain）
 │   ├── AppDelegate.swift          # 应用生命周期 + 菜单

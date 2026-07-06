@@ -64,6 +64,10 @@ Space: Play/Pause the current video or audio track.
 
 ESC: Close the media viewer and return to the thumbnail grid.
 
+🍎 macOS Port
+
+A full native macOS port lives in the [`macos/`](macos/) subdirectory — rewritten in **Swift + AppKit + AVFoundation + ImageIO**, keeping the same zero-third-party-dependency philosophy (Apple frameworks only, no Qt / FFmpeg). It matches the Windows feature set: magic-number sniffing, thumbnail grid, EXIF/GPS extraction, video ISO-6709 GPS scanning, Nominatim reverse geocoding, hand-built player controls, and the same hotkeys — plus macOS-only extras: subdirectory navigation and a session-wide thumbnail cache. HEIC works natively with no extra extension. Open `macos/PureViewMedia.xcodeproj` in Xcode, or build without Xcode via `macos/build-app.sh`. Details in [macos/README.md](macos/README.md).
+
 <h2 id="中文">中文 (Chinese)</h2>
 
 在 Electron 和各类庞大跨平台框架泛滥的今天，PureView (本源媒体浏览器) 选择回归极致的纯粹。这是一款基于 纯 Win32 API、GDI+ 以及 Media Foundation 打造的硬核、超轻量级 Windows 媒体浏览器。没有 Qt，没有 MFC，无需携带臃肿的 FFmpeg，真正的零第三方依赖。
@@ -129,5 +133,9 @@ Visual Studio (2019/2022/2025 均可)
 空格键 (Space): 全局暂停/播放当前的视频或音频文件。
 
 ESC: 关闭当前全屏/窗口播放器，返回缩略图网格。
+
+🍎 macOS 移植版
+
+完整的 macOS 原生移植在 [`macos/`](macos/) 子目录 —— 用 **Swift + AppKit + AVFoundation + ImageIO** 重写，同样坚持零第三方依赖（只用苹果系统框架，没有 Qt / FFmpeg）。功能与 Windows 版对齐：魔数嗅探、缩略图网格、EXIF/GPS 提取、视频 ISO-6709 GPS 扫描、Nominatim 反查、手搓播放控制器、同套快捷键；并新增 macOS 专属功能：子目录导航、本次运行的全局缩略图缓存。HEIC 原生支持、无需额外扩展。用 Xcode 打开 `macos/PureViewMedia.xcodeproj`，或免 Xcode 跑 `macos/build-app.sh`。详见 [macos/README.md](macos/README.md)。
 
 Built with ❤️ for Windows native development.

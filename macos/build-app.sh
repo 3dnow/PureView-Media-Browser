@@ -8,12 +8,15 @@ APP="$DIR/build/PureViewMedia.app"
 ARCH="$(uname -m)"   # arm64 或 x86_64
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 echo ">> 编译 (target: ${ARCH}-apple-macosx12.0) ..."
 swiftc -sdk "$SDK" -target "${ARCH}-apple-macosx12.0" -swift-version 5 -O \
   "$DIR"/Sources/*.swift \
   -o "$APP/Contents/MacOS/PureViewMedia"
+
+# 应用图标
+cp "$DIR/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,6 +29,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>CFBundleVersion</key><string>1</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>
