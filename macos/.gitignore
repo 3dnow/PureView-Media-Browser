@@ -1,0 +1,12 @@
+# 构建产物
+build/
+DerivedData/
+*.o
+*.swiftmodule
+
+# Xcode 用户数据
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
