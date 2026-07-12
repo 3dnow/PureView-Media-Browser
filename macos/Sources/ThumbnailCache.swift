@@ -11,6 +11,11 @@ final class ThumbnailCache {
 
     private let cache = NSCache<NSString, NSImage>()
 
+    // 负缓存：缩略图生成失败过的文件（损坏视频每次要做两次抽帧尝试，动辄数百 ms），
+    // 记住失败后跨目录导航不再反复重试。字符串集合极小，进程内常驻即可。
+    private var failed = Set<String>()
+    private let failedLock = NSLock()
+
     private init() {
         cache.countLimit = 4000   // 常规浏览足够，超出按 NSCache 策略驱逐
     }
@@ -21,5 +26,14 @@ final class ThumbnailCache {
 
     func set(_ image: NSImage, for url: URL) {
         cache.setObject(image, forKey: url.path as NSString)
+    }
+
+    func isFailed(_ url: URL) -> Bool {
+        failedLock.lock(); defer { failedLock.unlock() }
+        return failed.contains(url.path)
+    }
+
+    func markFailed(_ url: URL) {
+        failedLock.lock(); failed.insert(url.path); failedLock.unlock()
     }
 }

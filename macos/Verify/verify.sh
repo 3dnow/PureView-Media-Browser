@@ -6,8 +6,9 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 SDK="$(xcrun --show-sdk-path --sdk macosx)"
 BIN="$(mktemp -t pvlogictest)"
+ARCH="$(uname -m)"   # arm64 或 x86_64，与 build-app.sh 保持一致
 
-swiftc -sdk "$SDK" -target arm64-apple-macosx12.0 -swift-version 5 \
+swiftc -sdk "$SDK" -target "${ARCH}-apple-macosx12.0" -swift-version 5 \
   "$ROOT/Sources/MediaFile.swift" \
   "$ROOT/Sources/MetadataReader.swift" \
   "$ROOT/Sources/Geocoder.swift" \

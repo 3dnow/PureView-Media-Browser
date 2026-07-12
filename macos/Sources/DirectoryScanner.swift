@@ -21,6 +21,8 @@ enum DirectoryScanner {
             if isCancelled() { return Result(dirs: [], medias: []) }
             let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             if isDir {
+                // 隐藏目录（.git/.Trash 等）不作为可进入的文件夹展示
+                if u.lastPathComponent.hasPrefix(".") { continue }
                 dirs.append((url: u, name: u.lastPathComponent))
             } else {
                 let t = MediaIdentifier.identify(u)

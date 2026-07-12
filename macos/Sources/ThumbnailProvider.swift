@@ -62,9 +62,21 @@ enum ThumbnailProvider {
         return NSImage(cgImage: padded, size: NSSize(width: 120, height: 120))
     }
 
-    /// 查看器全图：全分辨率、已翻正。
+    /// 查看器全图解码上限：显示是 fit-to-window、没有缩放功能，按所有屏幕的最大像素维度封顶，
+    /// 对屏幕显示零画质损失。收益是内存（8000×6000 位图 183MB → 48MB，实测 3.8×；亿像素更多）——
+    /// 这让带成本上限的全图缓存真正装得下多张图，相邻预取才有意义。
+    /// 注意实测封顶解码本身反而略慢（ImageIO 缩放解码有重采样开销），换内存是明确的取舍。
+    /// MaxPixelSize 只缩不放：小于上限的图片保持原分辨率。首次访问需在主线程（内部读 NSScreen）。
+    static let fullDecodeCap: Int = {
+        let maxDim = NSScreen.screens
+            .map { Int(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }
+            .max() ?? 2880
+        return max(2880, maxDim)
+    }()
+
+    /// 查看器全图：按屏幕上限封顶解码、已翻正。
     static func fullImage(url: URL) -> NSImage? {
-        guard let cg = orientedCGImage(url: url, maxPixel: nil) else { return nil }
+        guard let cg = orientedCGImage(url: url, maxPixel: fullDecodeCap) else { return nil }
         return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 }

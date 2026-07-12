@@ -98,6 +98,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
     private var debounceWork: DispatchWorkItem?
     private var keyMonitor: Any?
 
+    // 全图缓存 + 相邻预取：←/→ 来回浏览不再重复解码。
+    // NSCache 按像素字节计成本，内存压力自动驱逐；in-flight 集合避免预取与前台重复解码同一文件。
+    private let fullImageCache = NSCache<NSString, NSImage>()
+    private var decodeInFlight = Set<String>()
+    private let decodeLock = NSLock()
+
     convenience init() {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 620),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -108,6 +114,9 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
         window?.delegate = self
         window?.isReleasedWhenClosed = false
         buildUI()
+        fullImageCache.countLimit = 6
+        fullImageCache.totalCostLimit = 512 * 1024 * 1024
+        _ = ThumbnailProvider.fullDecodeCap   // 在主线程触发 NSScreen 访问，之后后台线程只读常量
     }
 
     // MARK: - 打开
@@ -173,7 +182,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
         seekSlider.target = self
         seekSlider.action = #selector(seekChanged)
         seekSlider.onStart = { [weak self] in self?.isSeeking = true }
-        seekSlider.onEnd = { [weak self] in self?.isSeeking = false }
+        seekSlider.onEnd = { [weak self] in
+            self?.isSeeking = false
+            self?.seekPrecise()   // 松手后做一次零容差精确定位
+        }
         content.addSubview(seekSlider)
 
         timeLabel = makeLabel(size: 12, color: NSColor(calibratedWhite: 0.92, alpha: 1))
@@ -223,8 +235,8 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
         if infoVisible {
             infoPanel.isHidden = false
             infoPanel.frame = NSRect(x: rc.width - 300, y: 0, width: 300, height: rc.height)
-            infoTextField.frame = NSRect(x: 12, y: rc.height - 160, width: 276, height: 140)
-            gpsLabel.frame = NSRect(x: 12, y: 12, width: 276, height: rc.height - 180)
+            infoTextField.frame = NSRect(x: 12, y: max(0, rc.height - 160), width: 276, height: 140)
+            gpsLabel.frame = NSRect(x: 12, y: 12, width: 276, height: max(0, rc.height - 180))   // 极小窗口下不产生负高度
         } else {
             infoPanel.isHidden = true
         }
@@ -287,16 +299,18 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
             imageHostView.mode = .image
             imageHostView.isHidden = false
             playerView.isHidden = true
-            // 后台解码全图；旧图保留在屏直到新图就绪（零闪烁的关键，等价 WM_USER_IMAGE_LOADED）
+            // 缓存命中也要自增会话号，作废在途的旧解码，防止旧图迟到覆盖
             let session = imageLoadSession.increment()
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self = self else { return }
-                let img = ThumbnailProvider.fullImage(url: file.url)
-                DispatchQueue.main.async {
-                    guard self.imageLoadSession.current == session else { return }
+            if let cached = fullImageCache.object(forKey: file.url.path as NSString) {
+                imageHostView.image = cached   // 命中：秒切，零解码
+            } else {
+                // 后台解码全图；旧图保留在屏直到新图就绪（零闪烁的关键，等价 WM_USER_IMAGE_LOADED）
+                decodeFullImage(file.url) { [weak self] img in
+                    guard let self = self, self.imageLoadSession.current == session else { return }
                     self.imageHostView.image = img
                 }
             }
+            prefetchNeighbors(around: index)   // 相邻预取：下一次 ←/→ 大概率秒开
 
         case .audio:
             imageHostView.mode = .audioText
@@ -314,6 +328,40 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
         }
 
         layoutViewer()
+    }
+
+    // MARK: - 全图解码与预取
+
+    /// 后台解码全图并写入缓存。带 completion 的是前台加载（userInitiated），
+    /// 不带的是相邻预取（utility）；预取撞上 in-flight 任务时直接放弃，避免重复解码。
+    private func decodeFullImage(_ url: URL, completion: ((NSImage?) -> Void)? = nil) {
+        let path = url.path
+        decodeLock.lock()
+        let dup = decodeInFlight.contains(path)
+        if !dup { decodeInFlight.insert(path) }
+        decodeLock.unlock()
+        if dup && completion == nil { return }
+
+        DispatchQueue.global(qos: completion == nil ? .utility : .userInitiated).async { [weak self] in
+            let img = ThumbnailProvider.fullImage(url: url)
+            guard let self = self else { return }
+            if let img = img {
+                let cost = Int(img.size.width * img.size.height * 4)   // 像素字节
+                self.fullImageCache.setObject(img, forKey: path as NSString, cost: cost)
+            }
+            self.decodeLock.lock(); self.decodeInFlight.remove(path); self.decodeLock.unlock()
+            if let completion = completion { DispatchQueue.main.async { completion(img) } }
+        }
+    }
+
+    /// 预取当前位置左右各一张图片（视频/音频不预取——它们的加载本来就是流式的）
+    private func prefetchNeighbors(around index: Int) {
+        for j in [index - 1, index + 1] where j >= 0 && j < mediaFiles.count {
+            let f = mediaFiles[j]
+            guard f.type == .image,
+                  fullImageCache.object(forKey: f.url.path as NSString) == nil else { continue }
+            decodeFullImage(f.url)
+        }
     }
 
     // MARK: - 播放器
@@ -392,6 +440,16 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func seekChanged() {
         guard let player = player else { return }
+        let t = CMTime(seconds: seekSlider.doubleValue, preferredTimescale: 600)
+        if isSeeking {
+            player.seek(to: t)   // 拖拽中：默认容差（就近关键帧），高码率视频不卡
+        } else {
+            player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)   // 单击定位：精确
+        }
+    }
+
+    private func seekPrecise() {
+        guard let player = player else { return }
         player.seek(to: CMTime(seconds: seekSlider.doubleValue, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
     }
@@ -453,7 +511,13 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate {
         Geocoder.shared.fetch(lat: lat, lon: lon) { [weak self] finalDisplay in
             DispatchQueue.main.async {
                 guard let self = self, self.gpsSession.current == session else { return }
-                self.gpsLabel.stringValue = "GPS: \(lat), \(lon)\n\(finalDisplay)\n\n[双击在地图中打开]"
+                if let finalDisplay = finalDisplay {
+                    self.gpsLabel.stringValue = "GPS: \(lat), \(lon)\n\(finalDisplay)\n\n[双击在地图中打开]"
+                } else {
+                    // 失败未入缓存；放开 gpsFetched，重新打开信息栏 / 回看这张即可重试
+                    self.gpsFetched = false
+                    self.gpsLabel.stringValue = "GPS: \(lat), \(lon)\n📍 地址获取失败（网络原因），重新打开信息栏可重试\n\n[双击在地图中打开]"
+                }
             }
         }
     }

@@ -36,13 +36,14 @@ final class Geocoder {
         return cache[key]
     }
 
-    /// 拉取地址；结果（finalDisplay，含 📍 主行 + 详细地址）写入缓存后回调。
+    /// 拉取地址；成功时把 finalDisplay（📍 主行 + 详细地址）写入缓存并回调，失败回调 nil。
+    /// 失败不写缓存——网络抖动一次不应污染该 100m 网格整个会话，调用方可安排重试。
     /// 回调在 URLSession 的后台线程触发，调用方负责切回主线程并做会话校验。
-    func fetch(lat: Double, lon: Double, completion: @escaping (String) -> Void) {
+    func fetch(lat: Double, lon: Double, completion: @escaping (String?) -> Void) {
         let key = Geocoder.cacheKey(lat: lat, lon: lon)
         let urlStr = "https://nominatim.openstreetmap.org/reverse?format=json&lat=\(lat)&lon=\(lon)&accept-language=zh-CN"
         guard let url = URL(string: urlStr) else {
-            completion("📍 地址解析失败\n\n详细地址:\n"); return
+            completion(nil); return
         }
         var req = URLRequest(url: url)
         // Nominatim 使用条款要求带可识别 User-Agent
@@ -52,18 +53,19 @@ final class Geocoder {
 
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             let result = Geocoder.parse(data)
-            if let self = self {
+            if let self = self, let result = result {
                 self.lock.lock(); self.cache[key] = result; self.lock.unlock()
             }
             completion(result)
         }.resume()
     }
 
-    /// 解析 Nominatim JSON，拼出 finalDisplay。深度清洗 + 详细地址倒序还原为中文习惯顺序。
-    private static func parse(_ data: Data?) -> String {
+    /// 解析 Nominatim JSON，拼出 finalDisplay；什么都没解析出来（网络失败/JSON 异常/空地址）返回 nil。
+    /// 深度清洗 + 详细地址倒序还原为中文习惯顺序。
+    private static func parse(_ data: Data?) -> String? {
         guard let data = data,
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return "📍 地址解析失败\n\n详细地址:\n"
+            return nil
         }
         let address = obj["address"] as? [String: Any] ?? [:]
         func f(_ key: String) -> String { CleanLocation.clean((address[key] as? String) ?? "") }
@@ -73,9 +75,10 @@ final class Geocoder {
         var city = f("city"); if city.isEmpty { city = f("town") }
         let suburb = f("suburb")
 
+        // 过滤空段再拼接，避免「中国␣␣␣」这类多余空格
         var resultText = "地址解析失败"
-        let full = [country, state, city, suburb].joined(separator: " ")
-        if full.count > 3 { resultText = full }
+        let full = [country, state, city, suburb].filter { !$0.isEmpty }.joined(separator: " ")
+        if full.count >= 2 { resultText = full }
 
         var detailed = ""
         if let displayName = obj["display_name"] as? String, !displayName.isEmpty {
@@ -87,6 +90,7 @@ final class Geocoder {
             }
         }
 
+        if resultText == "地址解析失败" && detailed.isEmpty { return nil }
         return "📍 " + resultText + "\n\n详细地址:\n" + detailed
     }
 }

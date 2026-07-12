@@ -18,6 +18,9 @@ final class MediaCollectionItem: NSCollectionViewItem {
         thumb.frame = NSRect(x: 5, y: 35, width: 120, height: 120)
         thumb.imageScaling = .scaleProportionallyUpOrDown
         thumb.wantsLayer = true
+        // SF Symbol 占位图是模板图，默认 tint 跟随 labelColor——浅色系统外观下≈黑色，
+        // 画在深灰网格上不可见。固定为浅灰，两种外观下都清晰。
+        thumb.contentTintColor = NSColor(calibratedWhite: 0.8, alpha: 1)
 
         nameLabel.frame = NSRect(x: 0, y: 4, width: 130, height: 28)
         nameLabel.alignment = .center
@@ -53,6 +56,17 @@ final class MediaCollectionItem: NSCollectionViewItem {
         thumb.image = NSImage(named: NSImage.folderName)   // 系统标准彩色文件夹图标
         nameLabel.stringValue = name
     }
+
+    // 选中态可视化：系统强调色描边 + 淡填充（isSelectable 默认不画任何选中效果）
+    override var isSelected: Bool {
+        didSet {
+            view.layer?.cornerRadius = 10
+            view.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            view.layer?.borderWidth = isSelected ? 3 : 0
+            view.layer?.backgroundColor = isSelected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.15).cgColor : nil
+        }
+    }
 }
 
 /// 主窗口：选择目录、异步扫描、缩略图网格、子目录导航。
@@ -69,6 +83,7 @@ final class BrowserWindowController: NSWindowController, NSCollectionViewDataSou
     private var progressLabel: NSTextField!
     private var backButton: NSButton!
     private var viewer: ViewerWindowController?
+    private var keyMonitor: Any?   // 回车打开 / Cmd+↑ 返回上级（Finder 习惯）
 
     private let itemId = NSUserInterfaceItemIdentifier("MediaItem")
 
@@ -137,6 +152,19 @@ final class BrowserWindowController: NSWindowController, NSCollectionViewDataSou
         dbl.numberOfClicksRequired = 2
         dbl.delaysPrimaryMouseButtonEvents = false
         collectionView.addGestureRecognizer(dbl)
+
+        // 键盘导航（Finder 习惯）：回车/Enter 打开选中项，Cmd+↑ 返回上级；方向键选格子是 NSCollectionView 自带
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self, self.window?.isKeyWindow == true else { return event }
+            if event.keyCode == 36 || event.keyCode == 76 {   // Return / Enter
+                if let ip = self.collectionView.selectionIndexPaths.first {
+                    self.activate(entryAt: ip.item); return nil
+                }
+            } else if event.keyCode == 126, event.modifierFlags.contains(.command) {   // Cmd+↑
+                if !self.navStack.isEmpty { self.goBack(); return nil }
+            }
+            return event
+        }
     }
 
     // MARK: - NSCollectionViewDataSource
@@ -177,12 +205,18 @@ final class BrowserWindowController: NSWindowController, NSCollectionViewDataSou
 
     @objc private func handleDoubleClick(_ g: NSClickGestureRecognizer) {
         let p = g.location(in: collectionView)
-        guard let ip = collectionView.indexPathForItem(at: p), ip.item < entries.count else { return }
-        switch entries[ip.item] {
+        guard let ip = collectionView.indexPathForItem(at: p) else { return }
+        activate(entryAt: ip.item)
+    }
+
+    /// 打开一个格子：目录 → 进入并重扫；媒体 → 查看器。双击与回车共用。
+    private func activate(entryAt idx: Int) {
+        guard idx >= 0 && idx < entries.count else { return }
+        switch entries[idx] {
         case .directory(let url, _):
             enterDirectory(url)
         case .media:
-            openViewerForMedia(atEntryIndex: ip.item)
+            openViewerForMedia(atEntryIndex: idx)
         }
     }
 
@@ -259,23 +293,32 @@ final class BrowserWindowController: NSWindowController, NSCollectionViewDataSou
                 }
             }
 
-            // 第二阶段：仅为「未缓存」的媒体项后台生成缩略图，生成后存入缓存并回填
-            var generated = 0
-            for (mi, mf) in result.medias.enumerated() {
-                if self.scanSession.current != session { return }
-                if ThumbnailCache.shared.image(for: mf.url) != nil { continue }   // 已命中，跳过生成
-                let img = ThumbnailProvider.makeThumbnail(url: mf.url, type: mf.type)
-                if let img = img { ThumbnailCache.shared.set(img, for: mf.url) }
-                let entryIndex = dirCount + mi     // entries = 目录在前 + 媒体在后
-                generated += 1
-                let done = generated
-                DispatchQueue.main.async {
+            // 第二阶段：并行生成「未缓存且未标记失败」的缩略图（有界并发），生成即回填。
+            // 视频抽帧单个上百毫秒，串行按分钟计；有界并发提速数倍又不挤爆解码器。
+            let pendingList: [(entryIndex: Int, file: MediaFile)] = result.medias.enumerated().compactMap { (mi, mf) in
+                if ThumbnailCache.shared.image(for: mf.url) != nil { return nil }   // 已缓存
+                if ThumbnailCache.shared.isFailed(mf.url) { return nil }            // 负缓存：损坏文件不再反复重试
+                return (dirCount + mi, mf)                                          // entries = 目录在前 + 媒体在后
+            }
+            let doneCount = AtomicInt()
+            let queue = OperationQueue()
+            queue.maxConcurrentOperationCount = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 2))
+            for (entryIndex, mf) in pendingList {
+                queue.addOperation {
                     guard self.scanSession.current == session else { return }
-                    if entryIndex < self.thumbnails.count { self.thumbnails[entryIndex] = img }
-                    self.collectionView.reloadItems(at: [IndexPath(item: entryIndex, section: 0)])
-                    self.progressLabel.stringValue = "生成缩略图: \(done) 张（子目录 \(dirCount) 个，媒体 \(total) 个）"
+                    let img = ThumbnailProvider.makeThumbnail(url: mf.url, type: mf.type)
+                    if let img = img { ThumbnailCache.shared.set(img, for: mf.url) }
+                    else { ThumbnailCache.shared.markFailed(mf.url) }   // 记住失败，跨目录不再重做
+                    let done = doneCount.increment()
+                    DispatchQueue.main.async {
+                        guard self.scanSession.current == session else { return }
+                        if entryIndex < self.thumbnails.count { self.thumbnails[entryIndex] = img }
+                        self.collectionView.reloadItems(at: [IndexPath(item: entryIndex, section: 0)])
+                        self.progressLabel.stringValue = "生成缩略图: \(done) / \(pendingList.count)（子目录 \(dirCount) 个，媒体 \(total) 个）"
+                    }
                 }
             }
+            queue.waitUntilAllOperationsAreFinished()
 
             DispatchQueue.main.async {
                 guard self.scanSession.current == session else { return }
